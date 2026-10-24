@@ -4,6 +4,8 @@
 Usage: python3 build.py [data_dir] [out_file]
 Expects in data_dir: daily.json, county_daily_2026.json, county_daily_2024.json,
 county_daily_2022.json, precinct_2026.json, heat_2026.json, heat_2022.json, counties.json (formats in SPEC.md).
+Optional: proj.json (projected final electorate, from make_proj.py / Query M in PROJECTION.md). Without it the gated
+projection section is hidden.
 """
 import json, sys, os, datetime
 
@@ -84,6 +86,25 @@ assert len(precinct) == STATE['counties'], len(precinct)
 assert all(len(county[y]) == STATE['counties'] for y in county), {y: len(county[y]) for y in county}
 STATE['unmatched_pct'] = round(100 * daily['2026']['unmatched_rows'] / daily['2026']['rows_total'], 1)
 
+# Projected final electorate (optional). Must be computed at the same as-of day as the rest of the page.
+proj = None
+if os.path.exists(os.path.join(data_dir, 'proj.json')):
+    proj = load('proj.json')
+    if proj.get('dbe') != asof_d:
+        print(f"WARNING proj.json is as of d={proj.get('dbe')} but the page is as of d={asof_d}; re-run Query M "
+              f"and make_proj.py with ASOF={asof_d}. Projection section hidden.", file=sys.stderr)
+        proj = None
+
+def _built_et():
+    """Build time in US Eastern, e.g. 'Oct 24, 2026 9:05 AM ET' (matches the GitHub Action's stamp)."""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo('America/New_York'))
+    except Exception:
+        utc = datetime.datetime.now(datetime.timezone.utc)
+        now = utc + datetime.timedelta(hours=-4 if utc < datetime.datetime(2026, 11, 1, 6, tzinfo=datetime.timezone.utc) else -5)
+    return now.strftime('%b ') + str(now.day) + now.strftime(', %Y ') + now.strftime('%I:%M %p').lstrip('0') + ' ET'
+
 payload = {
     'ed': ED,
     'asof': {'d': asof_d, 'date': asof_date.isoformat()},
@@ -95,7 +116,7 @@ payload = {
     'heat': heat,
     'geo': geo,
     'state': STATE,
-    'built': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+    'built': _built_et(),
 }
 
 with open(os.path.join(here, 'template.html')) as f:
@@ -104,7 +125,8 @@ js = json.dumps(payload, separators=(',', ':')).replace('</', '<\\/')
 assert '/*__DATA__*/' in tpl and '/*__JS__*/' in tpl
 with open(os.path.join(here, 'app.js')) as f:
     appjs = f.read()
-html = tpl.replace('/*__DATA__*/', js).replace('/*__JS__*/', appjs).replace('__TITLE__', STATE['name'] + ' Early Vote 2026').replace('__STATE__', STATE['name']).replace('__PARTY_LABEL__', STATE.get('party_label','registered party')).replace('__OTHER_NOTE__', STATE.get('other_note','Other / unaffiliated includes voters with no party on file.'))
+pjs = json.dumps(proj, separators=(',', ':')).replace('</', '<\\/') if proj else 'null'
+html = tpl.replace('/*__DATA__*/', js).replace('/*__JS__*/', appjs).replace('/*__PROJ__*/null', pjs).replace('__TITLE__', STATE['name'] + ' Early Vote 2026').replace('__STATE__', STATE['name']).replace('__PARTY_LABEL__', STATE.get('party_label','registered party')).replace('__OTHER_NOTE__', STATE.get('other_note','Other / unaffiliated includes voters with no party on file.'))
 with open(out, 'w') as f:
     f.write(html)
 # Standalone copy for self-hosting (the artifact adds its own document skeleton; a web host does not)
@@ -118,4 +140,5 @@ standalone = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">
               '</head>\n<body>\n' + body + '\n</body>\n</html>\n')
 with open(os.path.join(os.path.dirname(out), 'index.html'), 'w') as f:
     f.write(standalone)
-print(f'wrote {out} ({len(html)/1e6:.2f} MB); as of {asof_date} (d={asof_d}); partial-day rows dropped: {partial_tot}')
+print(f'wrote {out} ({len(html)/1e6:.2f} MB); as of {asof_date} (d={asof_d}); partial-day rows dropped: {partial_tot}; '
+      + (f"projection {proj['early_net']:+.1f} -> {proj['proj_net']:+.1f}" if proj else 'no projection'))
